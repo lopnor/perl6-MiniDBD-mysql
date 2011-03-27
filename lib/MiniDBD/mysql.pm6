@@ -92,7 +92,6 @@ class MiniDBD::mysql::StatementHandle does MiniDBD::StatementHandle {
                 $statement .= subst('?',$param); # do not quote numbers
             }
         }
-        $!connection.finish; # clear result_set
         my $status = mysql_query( $!mysql_client, $statement ); # 0 means OK
         if $status != 0 { $!connection.check_mysql_error; }
         my $rows = self.rows;
@@ -117,28 +116,11 @@ class MiniDBD::mysql::StatementHandle does MiniDBD::StatementHandle {
     }
 
     method fetchrow_array() {
-        my @row_array;
-
-        my $result_set =  mysql_use_result( $!mysql_client);
-        my $field_count = mysql_field_count($!mysql_client);
-
-        if defined $result_set {
-            my $native_row = mysql_fetch_row($result_set); # can return NULL
-            $!connection.check_mysql_error;
-            
-            if $native_row {
-                loop ( my $i=0; $i < $field_count; $i++ ) {
-                    @row_array.push($native_row[$i]);
-                }
-            }
-            else { $!connection.finish; }
-        }
-        return @row_array;
+        $!connection.result.fetchrow_array;
     }
 
     method fetchrow_arrayref() {
-        my $row_arrayref;
-        $!connection.result.fetch;
+        return my $ref = $!connection.result.fetchrow_array;
     }
 
     method fetch() { self.fetchrow_arrayref() } # alias according to perldoc DBI
@@ -152,88 +134,61 @@ class MiniDBD::mysql::StatementHandle does MiniDBD::StatementHandle {
     }
 
     method fetchrow_hashref () {
-        my $row_hashref;
-        my %row_hash;
-
-        unless defined $!result_set {
-            $!result_set  = mysql_use_result($!mysql_client);
-            $!field_count = mysql_field_count($!mysql_client);
-        }
-
-        if defined $!result_set {
-            $!connection.check_mysql_error;
-            my $native_row = mysql_fetch_row($!result_set); # can return NULL
-
-            unless @!column_names {    
-                loop ( my $i=0; $i < $!field_count; $i++ ) {
-                    my $field_info  = mysql_fetch_field($!result_set);
-                    my $column_name = $field_info[0];
-                    @!column_names.push($column_name);    
-                }
-            }
-
-            if $native_row && @!column_names {
-                loop ( my $i=0; $i < $!field_count; $i++ ) {
-                    my $column_value = $native_row[$i];
-                    my $column_name  = @!column_names[$i];
-
-                    %row_hash{$column_name} = $column_value;
-                }
-            } else {
-                $!connection.finish;
-            }
-
-            $row_hashref = %row_hash;
-        }
-        return $row_hashref;
+        return $!connection.result.fetchrow_hashref;
     }
 
     method mysql_insertid() {
         $!connection.mysql_insertid;
     }
-
 }
 
 class MiniDBD::mysql::Result {
     has $!mysql_client;
     has $!connection;
-    has $!result_set;
-    has @!column_names;
+    has $!result_set is rw;
+    has $!field_count is rw;
+    has @!column_names is rw;
 
-    method new ($connection) {
-        my $client = $connection.mysql_client;
-        my $result_set = mysql_use_result($client);
-        my $field_count = mysql_field_count($client);
-        my @column_names;
-        for ( 1 .. $field_count ) {
-            my $field_info = mysql_fetch_field($result_set);
-            @column_names.push($field_info[0]);
+    method fetchrow_array {
+        unless defined $!result_set {
+            $!result_set = mysql_use_result($!mysql_client);
+            $!field_count = mysql_field_count($!mysql_client);
         }
-        self.bless(
-            *,
-            connection => $connection,
-            mysql_client => $client,
-            column_names => @column_names,
-            result_set => $result_set,
-        );
-    }
-
-    method fetch {
-        my $native_row = mysql_fetch_row($!result_set);
-        my $row;
-        if $native_row {
-            for 1 .. @!column_names.elems -> $i {
-                $row[$i] = $native_row[$i];
+        unless @!column_names {
+            for 0 ..^ $!field_count -> $i {
+                my $field_info  = mysql_fetch_field($!result_set);
+                my $column_name = $field_info[0];
+                @!column_names.push($column_name);    
             }
-            return $row;
-        } else {
-            $!connection.finish;
+        }
+
+        if defined $!result_set {
+            my $native_row = mysql_fetch_row($!result_set);
+            if $native_row {
+                my @row;
+                for 0 ..^ $!field_count -> $i {
+                    @row.push($native_row[$i]);
+                }
+                return @row;
+            } else {
+                $!connection.finish;
+            }
         }
         return;
     }
 
+    method fetchrow_hashref {
+        my %result;
+        my @row = self.fetchrow_array;
+        for 0 ..^ $!field_count -> $i {
+            %result{@!column_names[$i]} = @row[$i];
+        }
+        return %result;
+    }
+
     method free {
         mysql_free_result($!result_set);
+        $!connection.check_mysql_error;
     }
 }
 
@@ -310,7 +265,8 @@ class MiniDBD::mysql::Connection does MiniDBD::Connection {
 
     method result () {
         $!result //= MiniDBD::mysql::Result.new(
-            connection => self
+            connection => self,
+            mysql_client => $!mysql_client,
         );
         return $!result;
     }
@@ -336,6 +292,7 @@ class MiniDBD::mysql::Connection does MiniDBD::Connection {
     }
 
     method prepare( Str $statement ) {
+        self.finish;
         my $statement_handle = MiniDBD::mysql::StatementHandle.new(
             statement    => $statement,
             connection   => self,
