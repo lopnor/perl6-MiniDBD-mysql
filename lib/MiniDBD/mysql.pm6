@@ -72,6 +72,11 @@ sub mysql_options( OpaquePointer $mysql_client, Int $option, Str $arg)
     is native('libmysqlclient')
     { ... }
 
+sub mysql_thread_id( OpaquePointer $mysql_client )
+    returns Int
+    is native('libmysqlclient')
+    { ... }
+
 #-----------------------------------------------------------------------
 
 class MiniDBD::mysql::StatementHandle does MiniDBD::StatementHandle {
@@ -172,14 +177,14 @@ class MiniDBD::mysql::Result {
                 return @row;
             } else {
                 $!connection.finish;
-            }
+           }
         }
         return;
     }
 
     method fetchrow_hashref {
         my %result;
-        my @row = self.fetchrow_array;
+        my @row = self.fetchrow_array or return;
         for 0 ..^ $!field_count -> $i {
             %result{@!column_names[$i]} = @row[$i];
         }
@@ -187,8 +192,10 @@ class MiniDBD::mysql::Result {
     }
 
     method free {
-        mysql_free_result($!result_set);
-        $!connection.check_mysql_error;
+        if defined($!result_set) {
+            mysql_free_result($!result_set);
+            $!connection.check_mysql_error;
+        }
     }
 }
 
@@ -202,6 +209,7 @@ class MiniDBD::mysql::Connection does MiniDBD::Connection {
 
     method mysql_client {
         if (defined $!mysql_client) {
+            self.finish;
             my $status = mysql_ping($!mysql_client);
             if ($status != 0) {
                 self.connect;
@@ -282,6 +290,7 @@ class MiniDBD::mysql::Connection does MiniDBD::Connection {
     method disconnect () {
         self.finish;
         mysql_close($!mysql_client);
+        $!mysql_client = Mu;
         return Bool::True;
     }
 
